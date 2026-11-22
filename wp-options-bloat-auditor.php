@@ -8,6 +8,7 @@
  * Author URI: https://github.com/TABARC-Code
  * License: GPL-3.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-3.0.html
+ * Text Domain: wp-options-bloat-auditor
  *
  * Why this exists:
  * The options table is where plugins leave their mess when they leave. Autoloaded blobs, forgotten transients,
@@ -106,6 +107,20 @@ if ( ! class_exists( 'WP_Options_Bloat_Auditor' ) ) {
         }
 
         /**
+         * Autoload values that mean "loaded on every request".
+         * WordPress 6.6 and later store more than just 'yes'.
+         */
+        private function get_autoload_values() {
+            if ( function_exists( 'wp_autoload_values_to_autoload' ) ) {
+                $values = wp_autoload_values_to_autoload();
+                if ( is_array( $values ) && ! empty( $values ) ) {
+                    return array_values( array_map( 'strval', $values ) );
+                }
+            }
+            return array( 'yes' );
+        }
+
+        /**
          * Run a set of targeted queries rather than hauling the entire table into PHP.
          */
         private function run_audit() {
@@ -113,15 +128,26 @@ if ( ! class_exists( 'WP_Options_Bloat_Auditor' ) ) {
 
             $options_table = $wpdb->options;
 
+            $autoload_values = $this->get_autoload_values();
+            $autoload_in     = implode( ',', array_fill( 0, count( $autoload_values ), '%s' ) );
+
             // Summary stats.
             $total_options = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$options_table}" );
 
+            // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- placeholders only, built from a count.
             $autoload_options = (int) $wpdb->get_var(
-                "SELECT COUNT(*) FROM {$options_table} WHERE autoload = 'yes'"
+                $wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$options_table} WHERE autoload IN ({$autoload_in})",
+                    $autoload_values
+                )
             );
 
+            // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- placeholders only, built from a count.
             $autoload_bytes = (int) $wpdb->get_var(
-                "SELECT SUM(LENGTH(option_value)) FROM {$options_table} WHERE autoload = 'yes'"
+                $wpdb->prepare(
+                    "SELECT SUM(LENGTH(option_value)) FROM {$options_table} WHERE autoload IN ({$autoload_in})",
+                    $autoload_values
+                )
             );
 
             $autoload_bytes = max( 0, $autoload_bytes );
@@ -132,14 +158,15 @@ if ( ! class_exists( 'WP_Options_Bloat_Auditor' ) ) {
                 $limit_top = 50;
             }
 
+            // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- placeholders only, built from a count.
             $top_autoload = $wpdb->get_results(
                 $wpdb->prepare(
                     "SELECT option_name, autoload, LENGTH(option_value) AS size_bytes
                      FROM {$options_table}
-                     WHERE autoload = 'yes'
+                     WHERE autoload IN ({$autoload_in})
                      ORDER BY size_bytes DESC
                      LIMIT %d",
-                    $limit_top
+                    array_merge( $autoload_values, array( $limit_top ) )
                 )
             );
 
@@ -181,6 +208,7 @@ if ( ! class_exists( 'WP_Options_Bloat_Auditor' ) ) {
             );
 
             return array(
+                'autoload_values' => $autoload_values,
                 'total_options'   => $total_options,
                 'autoload_count'  => $autoload_options,
                 'autoload_bytes'  => $autoload_bytes,
@@ -303,7 +331,7 @@ if ( ! class_exists( 'WP_Options_Bloat_Auditor' ) ) {
             foreach ( $rows as $row ) {
                 $name   = $row->option_name;
                 $size   = (int) $row->size_bytes;
-                $autoload = ( $row->autoload === 'yes' );
+                $autoload = in_array( $row->autoload, $audit['autoload_values'], true );
 
                 echo '<tr>';
                 echo '<td><code>' . esc_html( $name ) . '</code></td>';
@@ -345,7 +373,7 @@ if ( ! class_exists( 'WP_Options_Bloat_Auditor' ) ) {
             foreach ( $rows as $row ) {
                 $name   = $row->option_name;
                 $size   = (int) $row->size_bytes;
-                $autoload = ( $row->autoload === 'yes' );
+                $autoload = in_array( $row->autoload, $audit['autoload_values'], true );
 
                 echo '<tr>';
                 echo '<td><code>' . esc_html( $name ) . '</code></td>';
@@ -361,7 +389,7 @@ if ( ! class_exists( 'WP_Options_Bloat_Auditor' ) ) {
         }
 
         public function inject_plugin_list_icon_css() {
-            $icon_url = esc_url( $this->get_brand_icon_url() );
+            $icon_url = $this->get_brand_icon_url();
             ?>
             <style>
                 .wp-list-table.plugins tr[data-slug="wp-options-bloat-auditor"] .plugin-title strong::before {
